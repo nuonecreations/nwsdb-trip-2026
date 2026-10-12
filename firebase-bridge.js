@@ -1,7 +1,14 @@
 /* NWSDB Trip 2026 - Firebase bridge
  * Adds: real Firestore cloud sync (shared + permanent data) and an
- * organizer-only login gate. Everyone can READ; only the organizer
- * (OWNER_EMAIL) can WRITE. Security is enforced by firestore.rules.
+ * organizer-only edit gate using a passcode.
+ *
+ * NOTE ON SECURITY: This app runs 100% on the free "no-card" plan, so the
+ * organizer check is enforced in the UI (client-side). A technically skilled
+ * visitor could bypass it. Do not store sensitive personal data here.
+ *
+ * To change the passcode: pick a new passcode, run
+ *   node -e "console.log(require('crypto').createHash('sha256').update('NEW_PW').digest('hex'))"
+ * and paste the result into PASS_HASH below, then redeploy.
  */
 (function () {
   "use strict";
@@ -14,12 +21,14 @@
     messagingSenderId: "425862393005",
     appId: "1:425862393005:web:543e722b5b9d8e17dfaa24"
   };
-  var OWNER_EMAIL = "trip@nwsdb.lk";
+  var PASS_HASH = "e3ead908cad84ab036ab1a8776155ec4e37ca1fb10b9da245ea32b6e9022c508"; // sha256("1235@com")
+  var STORE_KEY = "nwsdb_owner_session";
   var COLLECTION = "trips";
   var DOCTRIP = "main";
 
-  // Safe no-op API so the app still works if the SDK/network is unavailable.
   var api = {
+    owner: false,
+    lastJSON: "",
     isOwner: function () { return api.owner === true; },
     isEditing: function () {
       var el = document.activeElement;
@@ -28,36 +37,23 @@
     subscribe: function () { return function () {}; },
     save: function () {},
     ownerLogin: function () { return Promise.resolve(false); },
-    signOut: function () {},
-    owner: false,
-    lastJSON: ""
+    signOut: function () {}
   };
   window.__NWSDB = api;
+
+  try { if (sessionStorage.getItem(STORE_KEY) === "1") api.owner = true; } catch (e) {}
 
   if (typeof firebase === "undefined" || !firebase.initializeApp) {
     console.warn("[NWSDB] Firebase SDK not loaded. Running in local-only mode.");
     return;
   }
-
-  try {
-    firebase.initializeApp(CONFIG);
-  } catch (e) { /* already initialized */ }
-
-  var auth = firebase.auth();
+  try { firebase.initializeApp(CONFIG); } catch (e) {}
   var db = firebase.firestore();
   var docRef = db.collection(COLLECTION).doc(DOCTRIP);
-
-  function isOwnerEmail(email) {
-    return !!email && email.toLowerCase() === OWNER_EMAIL.toLowerCase();
-  }
 
   function serialize(data) {
     try { return JSON.stringify(data || {}); } catch (e) { return ""; }
   }
-
-  auth.onAuthStateChanged(function (u) {
-    api.owner = !!(u && isOwnerEmail(u.email));
-  });
 
   // ---- Real-time reads (public) ----
   api.subscribe = function (cb) {
@@ -73,7 +69,7 @@
     });
   };
 
-  // ---- Owner-only writes (debounced, de-duplicated) ----
+  // ---- Writes (only from organizer UI) ----
   var saveTimer = null;
   api.save = function (data) {
     if (!api.owner) return;
@@ -87,14 +83,11 @@
       logistics: data.logistics || []
     };
     var cmp = serialize(core);
-    if (cmp === api.lastJSON) return;            // nothing changed - avoid echo loop
+    if (cmp === api.lastJSON) return;
     if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(function () {
       api.lastJSON = cmp;
-      var payload = Object.assign({}, core, {
-        updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
-        updatedBy: (auth.currentUser && auth.currentUser.email) || OWNER_EMAIL
-      });
+      var payload = Object.assign({}, core, { updatedAt: new Date().toISOString() });
       docRef.set(payload, { merge: false }).catch(function (e) {
         console.warn("[NWSDB] save error:", e && e.message);
       });
@@ -102,23 +95,37 @@
   };
 
   api.signOut = function () {
-    try { auth.signOut(); } catch (e) {}
+    api.owner = false;
+    try { sessionStorage.removeItem(STORE_KEY); } catch (e) {}
   };
 
-  // ---- Organizer login gate ----
+  // ---- SHA-256 (browser) ----
+  function sha256hex(str) {
+    if (window.crypto && window.crypto.subtle) {
+      var buf = new TextEncoder().encode(str);
+      return window.crypto.subtle.digest("SHA-256", buf).then(function (h) {
+        return Array.prototype.map.call(new Uint8Array(h), function (b) {
+          return ("0" + b.toString(16)).slice(-2);
+        }).join("");
+      });
+    }
+    return Promise.resolve(null); // fallback: cannot verify
+  }
+
   api.ownerLogin = function () {
     return new Promise(function (resolve) {
-      var u = auth.currentUser;
-      if (u && isOwnerEmail(u.email)) {
-        api.owner = true;
-        resolve(true);
-        return;
-      }
-      showLoginModal(resolve);
+      if (api.owner) { resolve(true); return; }
+      showPassModal(resolve);
     });
   };
 
-  function showLoginModal(resolve) {
+  function unlock(resolve) {
+    api.owner = true;
+    try { sessionStorage.setItem(STORE_KEY, "1"); } catch (e) {}
+    resolve(true);
+  }
+
+  function showPassModal(resolve) {
     if (document.getElementById("__nwsdb_login")) return;
 
     var wrap = document.createElement("div");
@@ -127,14 +134,11 @@
 
     var card = document.createElement("div");
     card.style.cssText = "background:#fff;border-radius:16px;padding:22px;width:330px;max-width:92vw;box-shadow:0 20px 60px rgba(0,0,0,.35);";
-
     card.innerHTML =
       '<div style="font-weight:800;font-size:16px;color:#0f172a;margin-bottom:2px;">සංවිධායක පිවිසුම</div>' +
       '<div style="font-size:12px;color:#64748b;margin-bottom:14px;">Organizer login - to edit the shared data</div>' +
-      '<label style="display:block;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Email</label>' +
-      '<input id="__nwsdb_email" type="email" readonly style="width:100%;padding:10px 12px;border:1px solid #e2e8f0;border-radius:10px;font-size:13px;background:#f8fafc;color:#334155;box-sizing:border-box;margin-bottom:12px;" />' +
-      '<label style="display:block;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Password</label>' +
-      '<input id="__nwsdb_pw" type="password" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:13px;box-sizing:border-box;" />' +
+      '<label style="display:block;font-size:11px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px;">Passcode</label>' +
+      '<input id="__nwsdb_pw" type="password" autocomplete="off" style="width:100%;padding:10px 12px;border:1px solid #cbd5e1;border-radius:10px;font-size:13px;box-sizing:border-box;" />' +
       '<div id="__nwsdb_msg" style="font-size:12px;color:#dc2626;min-height:16px;margin-top:8px;"></div>' +
       '<div style="display:flex;gap:8px;margin-top:10px;">' +
       '<button id="__nwsdb_cancel" type="button" style="flex:1;padding:11px;border-radius:10px;border:1px solid #e2e8f0;background:#fff;color:#334155;font-weight:700;font-size:13px;cursor:pointer;">Cancel</button>' +
@@ -144,48 +148,21 @@
     wrap.appendChild(card);
     document.body.appendChild(wrap);
 
-    var emailEl = card.querySelector("#__nwsdb_email");
     var pwEl = card.querySelector("#__nwsdb_pw");
     var msgEl = card.querySelector("#__nwsdb_msg");
     var okEl = card.querySelector("#__nwsdb_ok");
-    emailEl.value = OWNER_EMAIL;
 
-    function close() {
-      if (wrap.parentNode) wrap.parentNode.removeChild(wrap);
-    }
+    function close() { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }
     function submit() {
       var pw = pwEl.value;
-      if (!pw) { msgEl.textContent = "Password ඇතුළත් කරන්න"; return; }
-      okEl.disabled = true;
-      okEl.textContent = "Checking...";
-      msgEl.textContent = "";
-      auth.signInWithEmailAndPassword(OWNER_EMAIL, pw).then(function (cred) {
-        if (cred && cred.user && isOwnerEmail(cred.user.email)) {
-          api.owner = true;
-          close();
-          resolve(true);
-        } else {
-          auth.signOut();
-          okEl.disabled = false;
-          okEl.textContent = "Login";
-          msgEl.textContent = "මෙම ගිණුමට සංස්කරණ අවසර නැත";
-        }
-      }).catch(function (e) {
-        okEl.disabled = false;
-        okEl.textContent = "Login";
-        var code = (e && e.code) || "";
-        if (code === "auth/wrong-password" || code === "auth/invalid-credential" || code === "auth/invalid-login-credentials") {
-          msgEl.textContent = "වැරදි password - නැවත උත්සාහ කරන්න";
-        } else if (code === "auth/too-many-requests") {
-          msgEl.textContent = "උත්සාහ ගණන වැඩි - පසුව උත්සාහ කරන්න";
-        } else if (code === "auth/network-request-failed") {
-          msgEl.textContent = "අන්තර්ජාල සම්බන්ධතාවය නැත";
-        } else {
-          msgEl.textContent = (e && e.message) || "Login failed";
-        }
+      if (!pw) { msgEl.textContent = "Passcode ඇතුළත් කරන්න"; return; }
+      okEl.disabled = true; okEl.textContent = "Checking..."; msgEl.textContent = "";
+      sha256hex(pw).then(function (h) {
+        okEl.disabled = false; okEl.textContent = "Login";
+        if (h && h === PASS_HASH) { close(); unlock(resolve); }
+        else { msgEl.textContent = "වැරදි passcode - නැවත උත්සාහ කරන්න"; pwEl.value = ""; pwEl.focus(); }
       });
     }
-
     okEl.addEventListener("click", submit);
     pwEl.addEventListener("keydown", function (ev) { if (ev.key === "Enter") submit(); });
     card.querySelector("#__nwsdb_cancel").addEventListener("click", function () { close(); resolve(false); });
