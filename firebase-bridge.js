@@ -56,13 +56,19 @@
   }
 
   // ---- Real-time reads (public) ----
+  // Viewers receive every update. The organizer loads the initial cloud copy
+  // once, then keeps their own local state (so their edits are never clobbered
+  // by echoes of their own saves).
   api.subscribe = function (cb) {
+    var first = true;
     return docRef.onSnapshot(function (snap) {
       if (!snap.exists) return;
       var data = snap.data() || {};
       delete data.updatedAt;
       delete data.updatedBy;
       api.lastJSON = serialize(data);
+      if (api.owner && !first) { first = false; return; }
+      first = false;
       cb(data);
     }, function (err) {
       console.warn("[NWSDB] snapshot error:", err && err.message);
