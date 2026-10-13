@@ -28,6 +28,7 @@
 
   var api = {
     owner: false,
+    ready: false,
     lastJSON: "",
     isOwner: function () { return api.owner === true; },
     isEditing: function () {
@@ -62,7 +63,8 @@
   api.subscribe = function (cb) {
     var first = true;
     return docRef.onSnapshot(function (snap) {
-      if (!snap.exists) return;
+      api.ready = true;
+      if (!snap.exists) { first = false; return; }
       var data = snap.data() || {};
       delete data.updatedAt;
       delete data.updatedBy;
@@ -78,7 +80,7 @@
   // ---- Writes (only from organizer UI) ----
   var saveTimer = null;
   api.save = function (data) {
-    if (!api.owner) return;
+    if (!api.owner || !api.ready) return;
     var core = {
       trip: data.trip || null,
       fees: data.fees || null,
@@ -89,10 +91,11 @@
       logistics: data.logistics || []
     };
     var cmp = serialize(core);
+    if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
     if (cmp === api.lastJSON) return;
-    if (saveTimer) clearTimeout(saveTimer);
     saveTimer = setTimeout(function () {
       api.lastJSON = cmp;
+      saveTimer = null;
       var payload = Object.assign({}, core, { updatedAt: new Date().toISOString() });
       docRef.set(payload, { merge: false }).catch(function (e) {
         console.warn("[NWSDB] save error:", e && e.message);
