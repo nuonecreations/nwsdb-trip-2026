@@ -122,6 +122,10 @@
       var d = snap.exists ? (snap.data() || {}) : {};
       if (d.day1) api.routes.day1 = d.day1;
       if (d.day2) api.routes.day2 = d.day2;
+      if (d.title1) api.routes.title1 = d.title1;
+      if (d.it1) api.routes.it1 = d.it1;
+      if (d.title2) api.routes.title2 = d.title2;
+      if (d.it2) api.routes.it2 = d.it2;
       if (cb) cb(api.routes);
     }, function (err) {
       console.warn("[NWSDB] routes snapshot error:", err && err.message);
@@ -134,6 +138,19 @@
     return routesRef.set({
       day1: r.day1,
       day2: r.day2,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
+  };
+
+  // Itinerary text lives in the same separate doc (trips/routes); still
+  // never touches the trip data in trips/main.
+  api.saveItinerary = function (d) {
+    if (!api.owner) return Promise.reject(new Error("not owner"));
+    return routesRef.set({
+      title1: d.title1,
+      it1: d.it1,
+      title2: d.title2,
+      it2: d.it2,
       updatedAt: new Date().toISOString()
     }, { merge: true });
   };
