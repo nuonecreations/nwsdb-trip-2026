@@ -52,6 +52,14 @@
   var db = firebase.firestore();
   var docRef = db.collection(COLLECTION).doc(DOCTRIP);
 
+  // Route Map links live in their OWN document (trips/routes) so updating
+  // the maps never touches the trip data in trips/main.
+  var routesRef = db.collection(COLLECTION).doc("routes");
+  api.routes = {
+    day1: "https://maps.app.goo.gl/HQx94VGBwhJizFvQ9",
+    day2: "https://maps.app.goo.gl/nBrMmpTamSV9kzbV8"
+  };
+
   function serialize(data) {
     try { return JSON.stringify(data || {}); } catch (e) { return ""; }
   }
@@ -106,6 +114,28 @@
   api.signOut = function () {
     api.owner = false;
     try { sessionStorage.removeItem(STORE_KEY); } catch (e) {}
+  };
+
+  // ---- Route Map links (separate doc; never touches trip data) ----
+  api.subscribeRoutes = function (cb) {
+    return routesRef.onSnapshot(function (snap) {
+      var d = snap.exists ? (snap.data() || {}) : {};
+      if (d.day1) api.routes.day1 = d.day1;
+      if (d.day2) api.routes.day2 = d.day2;
+      if (cb) cb(api.routes);
+    }, function (err) {
+      console.warn("[NWSDB] routes snapshot error:", err && err.message);
+      if (cb) cb(api.routes);
+    });
+  };
+
+  api.saveRoutes = function (r) {
+    if (!api.owner) return Promise.reject(new Error("not owner"));
+    return routesRef.set({
+      day1: r.day1,
+      day2: r.day2,
+      updatedAt: new Date().toISOString()
+    }, { merge: true });
   };
 
   // ---- SHA-256 (browser) ----
